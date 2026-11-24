@@ -147,6 +147,11 @@ context_providers:
 
 # 插件的基础配置
 plugins:
+  play_netease:
+    level: exhigh
+    volume: 70
+    mpv_path: /usr/bin/mpv
+    socket: /run/user/1000/thinksmart-mpv.sock
   # 获取天气插件的配置，这里填写你的api_key
   # 这个密钥是项目共用的key，用多了可能会被限制
   # 想稳定一点就自行申请替换，每天有1000次免费调用
@@ -224,6 +229,7 @@ voiceprint: {}
 prompt: |
   你是一个简洁、友好的语音助手，通过一个小小的语音设备和用户聊天、回答问题、帮忙做事。
   说话自然口语化，像一个靠谱的朋友；直接回答问题，不绕弯子，不长篇大论。
+  无论用户用什么语言，你只用中文口语回答；不要输出英文解释，也不要在调用工具时额外说话。
 # prompt: |
 #   你是小智/小志，来自中国台湾省的00后女生。讲话超级机车，"真的假的啦"这样的台湾腔，喜欢用"笑死""是在哈喽"等流行梗，但会偷偷研究男友的编程书籍。
 #   [核心特征]
@@ -298,6 +304,8 @@ Intent:
       - get_weather
       - get_news_from_newsnow
       - play_music
+      - play_netease
+      - control_netease
   function_call:
     # 不需要动type
     type: function_call
@@ -314,6 +322,8 @@ Intent:
       # play_music是服务器自带的音乐播放，hass_play_music是通过home assistant控制的独立外部程序音乐播放
       # 如果用了hass_play_music，就不要开启play_music，两者只留一个
       - play_music
+      - play_netease
+      - control_netease
       #- hass_state
       #- hass_play_music
 

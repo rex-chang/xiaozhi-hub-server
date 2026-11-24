@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from aiohttp import web
+from plugins_func.netease.login import LoginError
 
 from config.logger import setup_logging
 from core.admin import auth, catalog, config_store, connections, pages, pipeline, plugin_settings, updater
@@ -144,6 +145,23 @@ class AdminHandler:
                 web.post("/kiosk/asr", self.handle_kiosk_asr),
                 web.post("/kiosk/tts", self.handle_kiosk_tts),
                 web.get("/kiosk/chat/history", self.handle_kiosk_chat_history),
+                web.get("/kiosk/netease/login/status", self.handle_kiosk_netease_status),
+                web.post("/kiosk/netease/login/start", self.handle_kiosk_netease_start),
+                web.post("/kiosk/netease/login/refresh", self.handle_kiosk_netease_refresh),
+                web.post("/kiosk/netease/login/cancel", self.handle_kiosk_netease_cancel),
+                web.post("/kiosk/netease/logout", self.handle_kiosk_netease_logout),
+                web.get("/kiosk/netease/music/status", self.handle_kiosk_netease_music_status),
+                web.get("/kiosk/netease/music/lyrics", self.handle_kiosk_netease_music_lyrics),
+                web.post("/kiosk/netease/music/seek", self.handle_kiosk_netease_music_seek),
+                web.post("/kiosk/netease/music/volume", self.handle_kiosk_netease_music_volume),
+                web.post("/kiosk/netease/music/control", self.handle_kiosk_netease_music_control),
+                web.get("/kiosk/netease/music/search", self.handle_kiosk_netease_music_search),
+                web.get("/kiosk/netease/music/playlists", self.handle_kiosk_netease_music_playlists),
+                web.get("/kiosk/netease/music/playlist_tracks", self.handle_kiosk_netease_music_playlist_tracks),
+                web.get("/kiosk/netease/music/queue", self.handle_kiosk_netease_music_queue),
+                web.post("/kiosk/netease/music/play_queue", self.handle_kiosk_netease_music_play_queue),
+                web.post("/kiosk/netease/music/play_index", self.handle_kiosk_netease_music_play_index),
+                web.post("/kiosk/netease/music/like", self.handle_kiosk_netease_music_like),
                 web.post("/kiosk/chat/clear", self.handle_kiosk_chat_clear),
             ]
         )
@@ -656,6 +674,399 @@ class AdminHandler:
         if "X-Forwarded-For" in request.headers or "Forwarded" in request.headers:
             return False
         return request.remote in ("127.0.0.1", "::1")
+
+    # NETEASE_LOGIN_API_PATCH_V1
+    @staticmethod
+    def _netease_manager():
+        from plugins_func.netease.login import manager
+        return manager()
+
+    async def _netease_body(self, request, allowed=()):
+        if request.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType(text="需要 application/json")
+        raw = await request.content.read(1025)
+        if len(raw) > 1024:
+            return None, self._error("请求太大", 413)
+        try:
+            body = json.loads(raw)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="JSON 格式错误")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="JSON 格式错误")
+        unknown = set(body) - set(allowed)
+        if unknown:
+            return None, self._error("不支持请求参数", 400)
+        return body, None
+
+    async def handle_kiosk_netease_status(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        return self._json(await self._blocking(self._netease_manager().status))
+
+    async def handle_kiosk_netease_start(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_body(request)
+        if error:
+            return error
+        try:
+            result = await self._blocking(self._netease_manager().start)
+        except Exception:
+            import traceback
+            from pathlib import Path as _P
+            _P("/tmp/hub-login-debug.log").write_text(traceback.format_exc())
+            raise
+        return self._json(result)
+
+    async def _handle_kiosk_netease_task(self, request: web.Request, action):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_body(request, ("task_id",))
+        if error:
+            return error
+        task_id = str(body.get("task_id") or "")
+        if not task_id:
+            return self._error("缺少 task_id", 400)
+        try:
+            result = await self._blocking(action, task_id)
+        except LoginError as exc:
+            status = 404 if exc.code == "not_found" else 409
+            return self._error(exc.code, status)
+        return self._json(result, 200 if result.get("ok") else 409)
+
+    async def handle_kiosk_netease_refresh(self, request: web.Request):
+        return await self._handle_kiosk_netease_task(request, self._netease_manager().refresh)
+
+    async def handle_kiosk_netease_cancel(self, request: web.Request):
+        return await self._handle_kiosk_netease_task(request, self._netease_manager().cancel)
+
+    async def handle_kiosk_netease_logout(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_body(request)
+        if error:
+            return error
+        return self._json(await self._blocking(self._netease_manager().logout))
+
+    # NETEASE_MUSIC_API_PATCH_V1
+    @staticmethod
+    def _netease_music_player():
+        from plugins_func.netease.player import get_player
+
+        def resolver(track_id, level):
+            from plugins_func.netease import api, eapi
+
+            return api.song_url(eapi.Client(), track_id, level)
+
+        return get_player({}, resolver)
+
+    @staticmethod
+    def _netease_music_public(st):
+        """Player.status() -> the shape thinksmart-home's music card expects."""
+        if not st:
+            return {"playing": False, "paused": False, "elapsed": 0, "duration": 0, "volume": 70,
+                    "play_mode": "loop", "lyrics_seq": 0, "ambient": None, "sleep": None,
+                    "sleep_session": None, "sleep_preview": None, "track": None}
+        return {"playing": not st.get("paused"), "paused": bool(st.get("paused")),
+                "elapsed": st.get("position") or 0, "duration": st.get("duration") or 0,
+                "volume": st.get("volume", 70),
+                "play_mode": "single" if st.get("repeat") == "one" else "loop",
+                "lyrics_seq": st.get("id") or 0, "ambient": None, "sleep": None,
+                "sleep_session": None, "sleep_preview": None,
+                "track": {"title": st.get("name") or "", "artist": ", ".join(st.get("artists") or []),
+                          "cover": st.get("cover") or "", "mid": str(st.get("id") or "")}}
+
+    @staticmethod
+    def _netease_lrc_rows(lrc, tlrc, limit=300):
+        import re
+
+        def parse(text):
+            rows = {}
+            for line in (text or "").splitlines():
+                stamps = []
+                rest = line
+                while rest.startswith("["):
+                    close = rest.find("]")
+                    if close < 0:
+                        break
+                    tag = rest[1:close]
+                    m = re.match(r"^(\d+):(\d+(?:\.\d+)?)$", tag)
+                    if not m:
+                        break
+                    stamps.append(int(m.group(1)) * 60 + float(m.group(2)))
+                    rest = rest[close + 1:]
+                txt = rest.strip()
+                if txt and stamps:
+                    for t in stamps:
+                        rows[round(t, 2)] = txt
+            return rows
+
+        base, trans = parse(lrc), parse(tlrc)
+        merged = []
+        for t in sorted(base):
+            text = base[t] + (f"（{trans[t]}）" if trans.get(t) and trans[t] != base[t] else "")
+            merged.append({"time": t, "text": text[:160]})
+        return merged[:limit]
+
+    async def _netease_music_body(self, request, allowed=(), max_bytes=1024):
+        if request.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType(text="需要 application/json")
+        raw = await request.content.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            return None, self._error("请求太大", 413)
+        try:
+            body = json.loads(raw)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="JSON 格式错误")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="JSON 格式错误")
+        unknown = set(body) - set(allowed)
+        if unknown:
+            return None, self._error("不支持请求参数", 400)
+        return body, None
+
+    async def handle_kiosk_netease_music_status(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        try:
+            st = await self._blocking(self._netease_music_player().status)
+        except Exception:
+            st = None
+        return self._json(self._netease_music_public(st))
+
+    async def handle_kiosk_netease_music_lyrics(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        player = self._netease_music_player()
+        try:
+            st = await self._blocking(player.status)
+        except Exception:
+            st = None
+        if not st:
+            return self._json({"lyrics": [], "seq": 0, "mid": ""})
+
+        def fetch():
+            from plugins_func.netease import api, eapi
+
+            return api.lyrics(eapi.Client(), st["id"])
+
+        try:
+            lrc, tlrc = await self._blocking(fetch)
+        except Exception:
+            return self._json({"lyrics": [], "seq": 0, "mid": ""})
+        rows = self._netease_lrc_rows(lrc, tlrc)
+        return self._json({"lyrics": rows, "seq": st.get("id") or 0,
+                           "mid": str(st.get("id") or "")})
+
+    async def handle_kiosk_netease_music_seek(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_music_body(request, ("sec",))
+        if error:
+            return error
+        try:
+            sec = max(0.0, min(86400.0, float(body.get("sec"))))
+        except (TypeError, ValueError):
+            return self._error("sec 格式错误", 400)
+        player = self._netease_music_player()
+        if not await self._blocking(player.status):
+            return self._error("现在没有在播放", 409)
+        await self._blocking(player.seek, sec)
+        return self._json({"ok": True, "elapsed": round(sec, 2)})
+
+    async def handle_kiosk_netease_music_volume(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_music_body(request, ("volume",))
+        if error:
+            return error
+        try:
+            volume = max(0, min(100, int(round(float(body.get("volume"))))))
+        except (TypeError, ValueError):
+            return self._error("volume 格式错误", 400)
+        await self._blocking(self._netease_music_player().set_volume, volume)
+        return self._json({"ok": True, "volume": volume})
+
+    async def handle_kiosk_netease_music_control(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_music_body(request, ("action",))
+        if error:
+            return error
+        action = str(body.get("action") or "").strip().lower()
+        if action not in ("pause", "resume", "toggle", "next", "prev", "stop", "loop", "single", "shuffle", "mode"):
+            return self._error("不支持的动作", 400)
+        if action == "shuffle":
+            return self._error("暂不支持随机播放", 400)
+        player = self._netease_music_player()
+        if action == "loop":
+            await self._blocking(player.set_repeat, "all")
+        elif action == "single":
+            await self._blocking(player.set_repeat, "one")
+        elif action == "mode":
+            st = await self._blocking(player.status)
+            await self._blocking(player.set_repeat, "all" if (st or {}).get("repeat") == "one" else "one")
+        elif action == "toggle":
+            st = await self._blocking(player.status)
+            if not st:
+                return self._error("现在没有在播放", 409)
+            await self._blocking(player.resume if st.get("paused") else player.pause)
+        else:
+            await self._blocking(getattr(player, action))
+        st = await self._blocking(player.status)
+        pub = self._netease_music_public(st)
+        return self._json({"ok": True, "play_mode": pub["play_mode"]})
+
+    # NETEASE_MUSIC_API_PATCH_V2
+    @staticmethod
+    def _netease_music_track(t):
+        return {"id": t.id, "name": t.name, "artists": list(t.artists or []),
+                "album": t.album or "", "duration_ms": t.duration_ms or 0,
+                "cover": getattr(t, "cover", "") or ""}
+
+    @staticmethod
+    def _netease_music_client():
+        from plugins_func.netease import eapi, session
+
+        if not session.load():
+            raise PermissionError("还没有登录网易云")
+        return eapi.Client()
+
+    async def _netease_music_list(self, request, fn):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        try:
+            items = await self._blocking(fn)
+        except PermissionError as exc:
+            return self._error(str(exc), 401)
+        except Exception as exc:
+            return self._error(f"请求失败：{type(exc).__name__}", 502)
+        return self._json({"ok": True, "items": [self._netease_music_track(t) for t in items]})
+
+    async def handle_kiosk_netease_music_search(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        q = str(request.query.get("q") or "").strip()[:60]
+        if not q:
+            return self._error("缺少搜索词", 400)
+        from plugins_func.netease import api
+        return await self._netease_music_list(request, lambda: api.search_songs(self._netease_music_client(), q, 20))
+
+    async def handle_kiosk_netease_music_playlists(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+
+        def fetch():
+            from plugins_func.netease import api
+            client = self._netease_music_client()
+            me = client.account()
+            if not me:
+                raise PermissionError("还没有登录网易云")
+            return api.user_playlists(client, me["userId"])
+
+        try:
+            pls = await self._blocking(fetch)
+        except PermissionError as exc:
+            return self._error(str(exc), 401)
+        except Exception as exc:
+            return self._error(f"请求失败：{type(exc).__name__}", 502)
+        items = [{"id": p.get("id"), "name": p.get("name", ""), "cover": p.get("coverImgUrl", ""),
+                  "count": p.get("trackCount", 0)} for p in pls]
+        return self._json({"ok": True, "items": items})
+
+    async def handle_kiosk_netease_music_playlist_tracks(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        try:
+            pid = int(request.query.get("id") or 0)
+        except ValueError:
+            pid = 0
+        if not pid:
+            return self._error("缺少歌单 id", 400)
+        from plugins_func.netease import api
+        return await self._netease_music_list(request, lambda: api.playlist_tracks(self._netease_music_client(), pid))
+
+    async def handle_kiosk_netease_music_queue(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        player = self._netease_music_player()
+        items = [{"id": t.id, "name": t.name, "artists": list(t.artists or []),
+                  "album": t.album or "", "duration_ms": t.duration_ms or 0,
+                  "cover": getattr(t, "cover", "") or ""} for t in (player.queue or [])[:100]]
+        return self._json({"ok": True, "items": items, "index": player.index})
+
+    async def handle_kiosk_netease_music_play_queue(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_music_body(request, ("tracks", "start"), max_bytes=262144)
+        if error:
+            return error
+        from plugins_func.netease.api import Track
+        raw = body.get("tracks")
+        if not isinstance(raw, list) or not raw or len(raw) > 200:
+            return self._error("tracks 格式错误", 400)
+        tracks = []
+        for t in raw:
+            if not isinstance(t, dict) or type(t.get("id")) is not int or not t.get("name"):
+                return self._error("track 格式错误", 400)
+            artists = t.get("artists")
+            tracks.append(Track(id=t["id"], name=str(t["name"])[:200],
+                                artists=[str(a)[:80] for a in artists][:10] if isinstance(artists, list) else [],
+                                album=str(t.get("album") or "")[:200],
+                                duration_ms=int(t.get("duration_ms") or 0),
+                                cover=str(t.get("cover") or "")[:500]))
+        try:
+            start = max(0, min(int(body.get("start") or 0), len(tracks) - 1))
+        except (TypeError, ValueError):
+            start = 0
+        player = self._netease_music_player()
+        try:
+            await self._blocking(player.play_queue, tracks, start)
+        except Exception as exc:
+            from plugins_func.netease import eapi
+            if isinstance(exc, eapi.NeteaseError):
+                msg = ("网易云检测到当前网络环境存在风险，暂时无法播放，请稍后再试"
+                       if exc.code == -460 else f"网易云接口出错了（{exc.code}），请稍后再试")
+                return self._error(msg, 502)
+            raise
+        return self._json({"ok": True, "count": len(tracks)})
+
+    async def handle_kiosk_netease_music_play_index(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_music_body(request, ("index",))
+        if error:
+            return error
+        if type(body.get("index")) is not int or body["index"] < 0:
+            return self._error("index 格式错误", 400)
+        player = self._netease_music_player()
+        try:
+            ok = await self._blocking(player.play_at, body["index"])
+        except Exception as exc:
+            from plugins_func.netease import eapi
+            if isinstance(exc, eapi.NeteaseError):
+                msg = ("网易云检测到当前网络环境存在风险，暂时无法播放，请稍后再试"
+                       if exc.code == -460 else f"网易云接口出错了（{exc.code}），请稍后再试")
+                return self._error(msg, 502)
+            raise
+        return self._json({"ok": bool(ok)})
+
+    async def handle_kiosk_netease_music_like(self, request: web.Request):
+        if not self._from_this_machine(request):
+            return self._error("仅限本机", 403)
+        body, error = await self._netease_music_body(request, ("id", "like"))
+        if error:
+            return error
+        if type(body.get("id")) is not int or type(body.get("like")) is not bool:
+            return self._error("参数格式错误", 400)
+        from plugins_func.netease import api
+        try:
+            ok = await self._blocking(api.like, self._netease_music_client(), body["id"], body["like"])
+        except PermissionError as exc:
+            return self._error(str(exc), 401)
+        except Exception as exc:
+            return self._error(f"操作失败：{type(exc).__name__}", 502)
+        return self._json({"ok": bool(ok)})
 
     async def handle_kiosk_llm(self, request: web.Request):
         """可选的模型（装了 Claude Code 的话排第一个，然后是配好的 API 厂商、勾选的 Grok Bot）和当前选中的。

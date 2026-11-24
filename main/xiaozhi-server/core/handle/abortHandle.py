@@ -27,6 +27,12 @@ async def handleAbortMessage(conn: "ConnectionHandler", played_ms=None, drop_aud
     # 设置成打断状态，会自动打断llm、tts任务
     conn.close_after_chat = False
     conn.client_abort = True
+    if drop_audio:
+        try:
+            from plugins_func.netease.player import pause_for_abort
+            pause_for_abort()
+        except Exception:
+            pass
     # [xiaozhi-hub] 让 LLM 立即停止当前回答（claude_cli 向 Claude Code 发送中断）
     if callable(getattr(conn.llm, "abort", None)):
         conn.llm.abort(conn)

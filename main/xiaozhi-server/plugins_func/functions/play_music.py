@@ -20,7 +20,7 @@ play_music_function_desc = {
     "type": "function",
     "function": {
         "name": "play_music",
-        "description": "当用户要求播放音乐、歌曲时调用。",
+        "description": "只用于播放本机 music 目录里的音乐；在线点歌、歌手、每日推荐、我的歌单请用 play_netease。",
         "parameters": {
             "type": "object",
             "properties": {

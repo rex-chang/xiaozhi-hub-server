@@ -74,8 +74,10 @@ class TTSProvider(TTSProviderBase):
                 config["ttsPitch"], min_val=-12, max_val=12, base_val=0
             ))
 
-        self.host = "api.minimaxi.com"  # 备用地址：api-bj.minimaxi.com
-        self.api_url = f"https://{self.host}/v1/t2a_v2?GroupId={self.group_id}"
+        self.host = config.get("host") or "api.minimax.cn"  # 备用地址：api.minimaxi.com
+        self.api_url = f"https://{self.host}/v1/t2a_v2"
+        if self.group_id:
+            self.api_url += f"?GroupId={self.group_id}"
         self.header = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
