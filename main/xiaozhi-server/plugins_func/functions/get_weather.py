@@ -26,7 +26,8 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 AIR_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 # Nominatim 的使用规定：要带能认出应用的 User-Agent，每秒最多 1 次，结果要缓存
 USER_AGENT = "xiaozhi-hub-server weather plugin (https://github.com/justhalfbit/xiaozhi-hub-server)"
-TIMEOUT = httpx.Timeout(8.0, connect=4.0)  # 设备上实测每个接口 1.5 秒左右
+# 设备上实测每个接口 1.5 秒左右；走代理和 TLS 时并发建连偶发 4～6 秒，放宽以免误报连不上
+TIMEOUT = httpx.Timeout(15.0, connect=10.0)
 NOMINATIM_INTERVAL = 1.1
 DEFAULT_LOCATION = "广州"
 FORECAST_DAYS = 7
